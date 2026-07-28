@@ -174,17 +174,26 @@ class Database:
     # === Trades ===
 
     async def insert_trade(self, trade: dict) -> int:
-        """Записывает новую сделку."""
+        """Записывает сделку.
+
+        PaperTrader пишет уже закрытую сделку одной вставкой, а не парой
+        insert_trade/close_trade, поэтому pnl и closed_at обязаны попадать
+        в INSERT: без них каждая закрытая сделка оседала в истории с
+        pnl=0 и пустым closed_at, и статистика по стратегиям была нулевой.
+        """
         cursor = await self._db.execute(
             """INSERT INTO trades (exchange, symbol, side, type, amount, price, cost, fee,
-               strategy, order_id, status, leverage, stop_loss, take_profit, notes, opened_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               pnl, strategy, order_id, status, leverage, stop_loss, take_profit, notes,
+               opened_at, closed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 trade["exchange"], trade["symbol"], trade["side"], trade["type"],
                 trade["amount"], trade["price"], trade["cost"], trade.get("fee", 0),
+                trade.get("pnl", 0.0),
                 trade.get("strategy"), trade.get("order_id"), trade.get("status", "open"),
                 trade.get("leverage", 1), trade.get("stop_loss"), trade.get("take_profit"),
                 trade.get("notes"), trade.get("opened_at", datetime.utcnow().isoformat()),
+                trade.get("closed_at"),
             ),
         )
         await self._db.commit()
