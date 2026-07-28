@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scalp Research Report</title>
+<style>
+* { box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #fafafa;
+    color: #1f2328;
+    line-height: 1.55;
+    max-width: 1000px;
+    margin: 30px auto;
+    padding: 0 28px 80px;
+    -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 {
+    color: #0f172a;
+    border-bottom: 1px solid #e3e8ee;
+    padding-bottom: 6px;
+    margin-top: 1.8em;
+}
+h1 { font-size: 1.9em; margin-top: 0; }
+h2 { font-size: 1.45em; }
+h3 { font-size: 1.15em; border-bottom: none; }
+code {
+    background: #eef2f6;
+    color: #c7254e;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.92em;
+}
+pre {
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 14px 18px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 0.88em;
+}
+pre code { background: none; color: inherit; padding: 0; }
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 18px 0;
+    font-size: 0.93em;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+th, td {
+    padding: 9px 12px;
+    text-align: left;
+    border-bottom: 1px solid #e3e8ee;
+}
+th {
+    background: #f1f5f9;
+    color: #334155;
+    font-weight: 600;
+    border-bottom: 2px solid #cbd5e1;
+}
+tr:hover td { background: #f8fafc; }
+td:nth-child(n+4) { text-align: right; font-variant-numeric: tabular-nums; }
+ul, ol { margin: 10px 0 14px; padding-left: 24px; }
+li { margin: 4px 0; }
+blockquote {
+    border-left: 4px solid #94a3b8;
+    margin: 14px 0;
+    padding: 6px 16px;
+    background: #f1f5f9;
+    color: #475569;
+}
+strong { color: #0f172a; }
+a { color: #2563eb; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.toc {
+    background: #fff;
+    border: 1px solid #e3e8ee;
+    border-radius: 6px;
+    padding: 14px 22px;
+    margin: 24px 0;
+}
+.toc h3 { margin-top: 0; }
+@media (prefers-color-scheme: dark) {
+    body { background: #0f172a; color: #e2e8f0; }
+    h1, h2, h3, strong { color: #f8fafc; }
+    h1, h2 { border-bottom-color: #334155; }
+    code { background: #1e293b; color: #fbbf24; }
+    table { background: #1e293b; box-shadow: none; }
+    th { background: #334155; color: #e2e8f0; border-bottom-color: #475569; }
+    td { border-bottom-color: #334155; }
+    tr:hover td { background: #273449; }
+    blockquote { background: #1e293b; border-left-color: #64748b; color: #cbd5e1; }
+    .toc { background: #1e293b; border-color: #334155; }
+}
+</style>
+</head>
+<body>
+<h1 id="scalpmomentum-research-17052026">Scalp/Momentum Research — итоги фазы (17.05.2026)</h1>
+<h2 id="_1">Контекст</h2>
+<ul>
+<li><strong>Цель:</strong> разогнать $200 → ~$1000 на high-risk скальпе с плечом, торговля на MEXC (Binance Futures как референс данных).</li>
+<li><strong>Тестируемый период:</strong> 16.02.2026 → 17.05.2026 (90 дней).</li>
+<li><strong>Издержки в бэктестах:</strong> комиссия 0.05% taker × 2 + slippage 0.05% × 2 = <strong>0.1% round-trip</strong>. Реалистично для MEXC/Binance Futures.</li>
+<li><strong>Session-фильтр:</strong> торговля только 06–22 UTC (Европа + Америка), азиатскую ночь игнорируем — там тонкая ликвидность.</li>
+</ul>
+<h2 id="-15m-30">Регим-снимок (15m, окно 30 дней)</h2>
+<p>Все 14 монет вочлиста в <strong>трендовой фазе</strong> (ADX &gt; 25). Только TON (+35%), STRK (+12%), ATOM (+12%) в плюсе за 30 дней; остальные либо боковик, либо умеренное падение. Поэтому <strong>шорт-сигналы будут не менее важны лонгов</strong> — стратегии работают в обе стороны.</p>
+<p>Волатильность сильно разная — от BTC (ATR 0.19%) до HYPE (ATR 0.76%). Поэтому <strong>фиксированный % SL не работает</strong> — нужно <code>SL = N × ATR_14</code>.</p>
+<h2 id="_2">Что протестировано</h2>
+<ul>
+<li><strong>7 стратегий:</strong> ORB-Scalper 5m, EMA-Cross+Volume (5m и 15m), BB-Squeeze Breakout 15m, VWAP-Reversion 5m, Donchian-Breakout 15m, RSI Mean Reversion 15m, Heikin-Ashi Trend 15m, MTF-Momentum 5m.</li>
+<li><strong>Grid trade-management:</strong> <code>SL_mult ∈ {1.0, 1.5, 2.0, 2.5}</code>, <code>TP_mult ∈ {1.5, 2.0, 3.0, 4.0}</code>, <code>notional ∈ {1250, 2000, 3000}</code>.</li>
+<li><strong>Walk-forward:</strong> train 30 дней, test 15 дней, шаг 10 дней → 5 OOS-окон на каждый конфиг.</li>
+<li><strong>Всего:</strong> 4 704 in-sample прогона + 75 OOS-прогонов на 15 топ-конфигах.</li>
+</ul>
+<h2 id="_3">Главные открытия</h2>
+<ol>
+<li><strong>Дефолтный SL = 1×ATR съедается комиссиями.</strong> На BTC ATR 0.19%, fee+slip 0.1% → чистый SL/TP сжимается в 0.09/0.19% → негативный expectancy. Минимум <strong>SL = 2×ATR</strong>, оптимально 2-2.5×.</li>
+<li><strong>15m таймфрейм лучше 5m</strong> почти везде. На 5m overtrading + комиссии. EMA+Vol при переносе с 5m на 15m: WR 35% → 56%, ROI -100% → +130%.</li>
+<li><strong>RSI Mean Reversion с подтверждением reversal-свечой</strong> оказалась самой стабильной стратегией — 3 разных монеты в ROBUST.</li>
+<li><strong>BB Squeeze показала самые красивые in-sample цифры (ATOM +308%), но провалилась на out-of-sample</strong> (+6%). Классический overfit. <strong>Без walk-forward бы потеряли всё.</strong></li>
+</ol>
+<h2 id="robust-out-of-sample">ROBUST конфиги (выживают на out-of-sample)</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Coin</th>
+<th>Strategy</th>
+<th>SL×ATR</th>
+<th>TP×ATR</th>
+<th>Notional</th>
+<th>IS ROI</th>
+<th>OOS avg/окно</th>
+<th>OOS win/n</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>PEPE</td>
+<td>RSI_MR_15m</td>
+<td>2.5</td>
+<td>4.0</td>
+<td>$3000</td>
+<td>+354%</td>
+<td><strong>+35%</strong></td>
+<td>4/5</td>
+</tr>
+<tr>
+<td>2</td>
+<td>ATOM</td>
+<td>RSI_MR_15m</td>
+<td>2.5</td>
+<td>4.0</td>
+<td>$3000</td>
+<td>+158%</td>
+<td><strong>+46%</strong></td>
+<td>4/5</td>
+</tr>
+<tr>
+<td>3</td>
+<td>RENDER</td>
+<td>RSI_MR_15m</td>
+<td>2.5</td>
+<td>3.0</td>
+<td>$3000</td>
+<td>+285%</td>
+<td>+19%</td>
+<td>4/5</td>
+</tr>
+<tr>
+<td>4</td>
+<td>ATOM</td>
+<td>EMA+Vol_15m</td>
+<td>2.0</td>
+<td>4.0</td>
+<td>$3000</td>
+<td>+133%</td>
+<td>+21%</td>
+<td>3/5</td>
+</tr>
+<tr>
+<td>5</td>
+<td>TON</td>
+<td>Donchian_15m_filt</td>
+<td>2.5</td>
+<td>3.0</td>
+<td>$1250</td>
+<td>+108%</td>
+<td>+10%</td>
+<td>3/5</td>
+</tr>
+<tr>
+<td>6</td>
+<td>TON</td>
+<td>ORB_5m_strict</td>
+<td>2.5</td>
+<td>4.0</td>
+<td>$3000</td>
+<td>+59%</td>
+<td>+14%</td>
+<td>3/5</td>
+</tr>
+<tr>
+<td>7</td>
+<td>LINK</td>
+<td>EMA+Vol_15m</td>
+<td>2.5</td>
+<td>4.0</td>
+<td>$1250</td>
+<td>+65%</td>
+<td>+10%</td>
+<td>3/5</td>
+</tr>
+</tbody>
+</table>
+<p><strong>ROBUST-критерий:</strong> OOS_avg &gt; +10% за 15 дней + &gt;60% позитивных окон.</p>
+<h2 id="200-90">Симуляция $200 → ? за 90 дней (каждая стратегия независимо)</h2>
+<table>
+<thead>
+<tr>
+<th>Конфиг</th>
+<th>ROI</th>
+<th>Max DD</th>
+<th>Final</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PEPE × RSI_MR_15m</td>
+<td>+354%</td>
+<td>-32%</td>
+<td><strong>$908</strong></td>
+</tr>
+<tr>
+<td>RENDER × RSI_MR_15m</td>
+<td>+285%</td>
+<td>-51%</td>
+<td>$770</td>
+</tr>
+<tr>
+<td>ATOM × RSI_MR_15m</td>
+<td>+158%</td>
+<td>-45%</td>
+<td>$516</td>
+</tr>
+<tr>
+<td>ATOM × EMA+Vol_15m</td>
+<td>+133%</td>
+<td>-51%</td>
+<td>$465</td>
+</tr>
+<tr>
+<td>TON × Donchian_filt</td>
+<td>+108%</td>
+<td>-77%</td>
+<td>$416</td>
+</tr>
+<tr>
+<td>LINK × EMA+Vol_15m</td>
+<td>+65%</td>
+<td>-42%</td>
+<td>$330</td>
+</tr>
+<tr>
+<td>TON × ORB_5m_strict</td>
+<td>+59%</td>
+<td>-47%</td>
+<td>$317</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Средний результат: $200 → $532 (+166%)</strong> — это «выбрал одну ROBUST стратегию случайно».
+<strong>Топ-1: PEPE × RSI_MR_15m, $200 → $908</strong> — почти попадание в таргет «$200 → $1000».</p>
+<h2 id="production">Что НЕ годится для production</h2>
+<ul>
+<li>BBSqueeze 15m с in-sample &gt; 150% (overfit, OOS падает в 0 или минус)</li>
+<li>VWAP-Reversion 5m (overtrading, комиссии съедают)</li>
+<li>ORB 5m с дефолтным vol_mult=1.5 (слишком много false-positive). Strict-версия (vol_mult=2.5) на TON робастна, но на других монетах не работает.</li>
+<li>Heikin-Ashi Trend и MTF-Momentum — не нашли робастных конфигов на этих монетах.</li>
+</ul>
+<h2 id="_4">Реальные ожидания на торговлю</h2>
+<ul>
+<li><strong>Не +354% в месяц.</strong> Это in-sample. OOS-окно дало +35% за 15 дней на PEPE RSI_MR — это ожидаемая «честная» производительность. Сходится с +60-100% в месяц на хорошей стратегии.</li>
+<li><strong>OOS_std 30-40%</strong> — это значит за одно 15-дневное окно реально может быть +50% или -10%. Будут проигрышные периоды.</li>
+<li><strong>Max DD 30-50%</strong> на каждой стратегии. На общем балансе при концентрации — реально терять половину equity по ходу. Готовность к этому критична.</li>
+</ul>
+<h2 id="_5">Что я рекомендую на запуск в понедельник</h2>
+<h3 id="a">Вариант A — концентрированный (агрессивный)</h3>
+<ul>
+<li><strong>PEPE × RSI_MR_15m</strong> (SL 2.5×ATR, TP 4.0×ATR, notional $3000) — на полный $200 баланс</li>
+<li>Ожидание: за 15 дней +30-50%, max DD до 50%.</li>
+<li>Если на 30 днях получится +50% — взять прибыль и не наращивать размер.</li>
+</ul>
+<h3 id="b">Вариант B — диверсифицированный (умереннее)</h3>
+<ul>
+<li>3 топ-конфига одновременно с шарингом баланса:</li>
+<li><strong>PEPE × RSI_MR_15m</strong> ($1500 notional)</li>
+<li><strong>ATOM × RSI_MR_15m</strong> ($1500 notional)</li>
+<li><strong>RENDER × RSI_MR_15m</strong> ($1500 notional)</li>
+<li>Каждая на 1/3 баланса по margin. Сделки могут идти параллельно, поэтому notional каждой нужно делить пропорционально.</li>
+<li>Ожидание: более ровная кривая, max DD ~25-35%, ROI +20-40% за 15 дней.</li>
+</ul>
+<h3 id="c-5-1250">Вариант C — на 5 стратегий с лимитом ($1250)</h3>
+<ul>
+<li>Все 7 ROBUST конфигов одновременно, но notional ограничен $1250 на каждую (= 6.25× плечо).</li>
+<li>Самый «спокойный» вариант. Ожидание: +15-30% за 15 дней, DD &lt; 25%.</li>
+</ul>
+<h2 id="production-">Что нужно для production-запуска</h2>
+<ol>
+<li><strong>Перевести стратегии в <code>strategies/</code>-каталог бота</strong> (сейчас живут в <code>research/strategies/</code>).</li>
+<li><strong>Перевести paper_trader на Binance Futures API</strong> (сейчас он ходит на Spot). Подменить <code>api.binance.com/api/v3/klines</code> на <code>fapi.binance.com/fapi/v1/klines</code> + правильные тикеры (1000PEPEUSDT и т.д.).</li>
+<li><strong>Реализовать shared-equity</strong> — общий пул margin, который распределяется между одновременно открытыми позициями. Сейчас в бэктесте каждая стратегия в своём пузыре.</li>
+<li><strong>Добавить новые аккаунты в LIVE_PAPER_CONFIGS</strong> — те 7 ROBUST или подмножество.</li>
+<li><strong>На бирже (MEXC)</strong> — это уже твоя ручная часть. Бот шлёт сигналы, ты исполняешь руками. Когда поймём, что система устойчива — можно подключить API MEXC напрямую.</li>
+</ol>
+<h2 id="_6">Файлы исследования</h2>
+<ul>
+<li><code>research/data_loader.py</code> — пул свечей с Binance Futures</li>
+<li><code>research/regime_snapshot.py</code> — текущий снимок режимов</li>
+<li><code>research/backtest_engine.py</code> — движок с поддержкой плеча, шорта, ATR-стопов</li>
+<li><code>research/strategies/*.py</code> — 8 стратегий (5 базовых + 3 добавленных)</li>
+<li><code>research/filters.py</code> — session-фильтр (06–22 UTC)</li>
+<li><code>research/focused_tuning.py</code> — grid SL × TP × notional</li>
+<li><code>research/walk_forward.py</code> — robustness check на скользящем окне</li>
+<li><code>research/portfolio_simulation.py</code> — финальная сводка</li>
+<li><code>research/data/</code> — parquet-кэш свечей + CSV с результатами (<code>quick_screen.csv</code>, <code>focused_tuning.csv</code>, <code>walk_forward.csv</code>, <code>portfolio_equity_curve.csv</code>, <code>regime_snapshot.csv</code>)</li>
+</ul>
+</body>
+</html>

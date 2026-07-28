@@ -6,6 +6,7 @@ Telegram бот — интерфейс управления трейдинг-б�
 import logging
 from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters,
@@ -30,6 +31,7 @@ class TelegramBot:
         """Возвращает клавиатуру главного меню. Админу добавляется кнопка управления."""
         keyboard = [
             [InlineKeyboardButton("📊 Статус", callback_data="status")],
+            [InlineKeyboardButton("📈 Открытые позиции", callback_data="positions")],
             [InlineKeyboardButton("📜 История сигналов", callback_data="history"),
              InlineKeyboardButton("📋 Логи анализа", callback_data="paper_logs")],
             [InlineKeyboardButton("📖 Информация по стратегиям", callback_data="strategy_info")],
@@ -58,6 +60,23 @@ class TelegramBot:
     def _back_button() -> list[InlineKeyboardButton]:
         """Возвращает кнопку возврата в главное меню."""
         return [InlineKeyboardButton("◀️ Главное меню", callback_data="back_main")]
+
+    @staticmethod
+    async def _show_text(query, text: str, reply_markup=None) -> None:
+        """Показать текстовое сообщение в ответ на callback. Если текущее сообщение — фото
+        (или иначе нет редактируемого текста), шлёт новое; иначе делает edit_message_text.
+        Глотает 'Message is not modified'."""
+        msg = query.message
+        is_photo = bool(getattr(msg, "photo", None)) or bool(getattr(msg, "video", None))
+        if is_photo or msg.text is None:
+            await msg.reply_text(text, reply_markup=reply_markup)
+            return
+        try:
+            await query.edit_message_text(text, reply_markup=reply_markup)
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+            raise
 
     def _back_keyboard(self) -> InlineKeyboardMarkup:
         """Возвращает клавиатуру только с кнопкой назад."""
@@ -598,8 +617,8 @@ class TelegramBot:
 
         if data == "back_main":
             # Вернуться в главное меню (учитывая админ-права)
-            await query.edit_message_text(
-                "Главное меню:",
+            await self._show_text(
+                query, "Главное меню:",
                 reply_markup=self._main_menu_keyboard(uid),
             )
             return
@@ -607,6 +626,14 @@ class TelegramBot:
         if data == "status":
             text = await self._format_status_v3(uid)
             await query.edit_message_text(text, reply_markup=self._back_keyboard())
+
+        elif data == "positions" or data == "positions_refresh":
+            text, keyboard = await self._format_open_positions(uid)
+            await self._show_text(query, text, reply_markup=keyboard)
+
+        elif data.startswith("position_chart_"):
+            account_id = data.replace("position_chart_", "")
+            await self._send_position_chart(query, uid, account_id)
 
         elif data == "bot_start":
             if not self.engine._running:
@@ -1749,6 +1776,32 @@ class TelegramBot:
         overall = "✅ Всё в порядке" if hc["overall_ok"] else "⚠️ Есть проблемы"
         text += f"Общий статус: {overall}\n\n"
 
+        # Telegram API канал — критичная метрика
+        tg_ok = hc.get("telegram_api_ok")
+        tg_checked_at = hc.get("telegram_api_checked_at")
+        tg_err = hc.get("telegram_api_error")
+        if tg_ok is None:
+            tg_line = "Telegram API: ⚪ ещё не проверялся"
+        elif tg_ok:
+            tg_line = "Telegram API: 🟢 доступен"
+        else:
+            tg_line = f"Telegram API: 🔴 НЕДОСТУПЕН ({tg_err or 'unknown'})"
+        if tg_checked_at:
+            try:
+                checked_dt = datetime.fromisoformat(tg_checked_at) + timedelta(hours=5)
+                tg_line += f"  ·  проверка: {checked_dt.strftime('%H:%M')}"
+            except (ValueError, TypeError):
+                pass
+        text += tg_line + "\n"
+
+        # Очередь недоставленных алертов
+        pending = hc.get("pending_alerts_count", 0)
+        if pending > 0:
+            text += f"Очередь алертов: 📬 {pending} ждут доставки\n"
+        else:
+            text += "Очередь алертов: пусто\n"
+        text += "\n"
+
         if hc["issues"]:
             text += "🔴 Обнаруженные проблемы:\n"
             for issue in hc["issues"]:
@@ -1809,6 +1862,11 @@ class TelegramBot:
             "eth_micro_15m": "ETH Micro Breakout 15m",
             "eth_pure_fake_4h": "ETH Fake Breakout 4h",
             "sol_combined_4h": "SOL Combined 4h",
+            "scalp_pepe_rsi_15m":     "PEPE Scalp RSI 15m",
+            "scalp_atom_rsi_15m":     "ATOM Scalp RSI 15m",
+            "scalp_render_rsi_15m":   "RENDER Scalp RSI 15m",
+            "scalp_ton_donchian_15m": "TON Scalp Donchian 15m",
+            "scalp_link_emavol_15m":  "LINK Scalp EMA+Vol 15m",
         }
         aid = getattr(account, "account_id", str(account))
         return titles.get(aid, aid)
@@ -2030,34 +2088,223 @@ class TelegramBot:
 
         text = "📊 Статус стратегий\n━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        for acc_id, acc in paper_trader.accounts.items():
-            if acc_id not in sub_ids:
-                continue
-            title = paper_trader._account_title(acc)
+        # Разделим аккаунты на «обычные» и «scalp pack» — pack-аккаунты группируем в свою секцию
+        my_accounts = [(aid, a) for aid, a in paper_trader.accounts.items() if aid in sub_ids]
+        regular = [(aid, a) for aid, a in my_accounts if not getattr(a, "pack", None)]
+        scalp = [(aid, a) for aid, a in my_accounts if getattr(a, "pack", None) == "scalp_pack"]
 
-            # Баланс и PnL
+        def render_acc(acc) -> str:
+            title = paper_trader._account_title(acc)
             bal_str = self._fmt_money(acc.equity)
             pnl_emoji = "🟢" if acc.pnl_pct >= 0 else "🔴"
-
-            text += f"▸ {title}\n"
-            text += f"  {pnl_emoji} Баланс: {bal_str} ({acc.pnl_pct:+.1f}%)\n"
-            text += f"  Сделок: {acc.trade_count} · WR: {acc.win_rate:.0f}%\n"
-
-            # Позиция
+            out = f"▸ {title}\n"
+            out += f"  {pnl_emoji} Баланс: {bal_str} ({acc.pnl_pct:+.1f}%)\n"
+            out += f"  Сделок: {acc.trade_count} · WR: {acc.win_rate:.0f}%\n"
             if acc.open_trade:
                 t = acc.open_trade
                 side = "LONG" if t["side"] == "buy" else "SHORT"
                 side_emoji = "🟢" if t["side"] == "buy" else "🔴"
-                entry = t["entry_price"]
-                sl = t["sl_price"]
-                tp = t["tp_price"]
-                text += f"  {side_emoji} В позиции: {side} @ ${entry:,.2f}\n"
-                text += f"     SL ${sl:,.2f}  ·  TP ${tp:,.2f}\n"
+                out += f"  {side_emoji} В позиции: {side} @ ${t['entry_price']:,.4f}\n"
+                out += f"     SL ${t['sl_price']:,.4f}  ·  TP ${t['tp_price']:,.4f}\n"
             else:
-                text += "  ⏳ Нет открытых позиций\n"
-            text += "\n"
+                out += "  ⏳ Нет открытых позиций\n"
+            return out + "\n"
+
+        for _, acc in regular:
+            text += render_acc(acc)
+
+        if scalp:
+            total_eq = sum(a.equity for _, a in scalp)
+            total_init = sum(a.initial_balance for _, a in scalp)
+            pack_pnl_pct = (total_eq / total_init - 1) * 100 if total_init else 0
+            pack_emoji = "🟢" if pack_pnl_pct >= 0 else "🔴"
+            text += f"━━━━━━━━━━━━━━━━━━━━\n"
+            text += f"⚡ Scalp Pack ({len(scalp)} стратегий, Binance Futures)\n"
+            text += f"{pack_emoji} Общий: ${total_eq:,.2f} (стартовый ${total_init:,.0f}, "
+            text += f"{pack_pnl_pct:+.1f}%)\n\n"
+            for _, acc in scalp:
+                text += render_acc(acc)
 
         return text
+
+    async def _format_open_positions(self, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+        """
+        Список открытых позиций пользователя с актуальной ценой и PnL.
+        Возвращает (text, keyboard) — клавиатура содержит кнопки графиков и «Обновить».
+        """
+        from datetime import datetime, timedelta as _td
+        paper_trader = getattr(self.engine, "paper_trader", None)
+        db = self.engine.db
+        if not paper_trader or not paper_trader.accounts or not db:
+            return "📡 Paper Trading не запущен", self._back_keyboard()
+
+        subs = await db.get_user_subscriptions(user_id)
+        sub_ids = {s["account_id"] for s in subs}
+        if not sub_ids:
+            return (
+                "📈 Открытые позиции\n━━━━━━━━━━━━━━━━━━━━\nУ вас нет подписок на стратегии.",
+                self._back_keyboard(),
+            )
+
+        positions = await paper_trader.get_open_positions_detail(account_ids=sub_ids)
+
+        # Header — таймстамп Перм. ТЗ; нужен ещё и для обхода BadRequest "not modified"
+        now_perm = datetime.utcnow() + _td(hours=5)
+        header = f"📈 Открытые позиции\n━━━━━━━━━━━━━━━━━━━━\nОбновлено: {now_perm.strftime('%H:%M:%S')} (Пермь)\n\n"
+
+        if not positions:
+            text = header + "⏳ Сейчас открытых позиций нет.\nКак только стратегия откроет сделку — она появится здесь."
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Обновить", callback_data="positions_refresh")],
+                [InlineKeyboardButton("◀️ Главное меню", callback_data="back_main")],
+            ])
+            return text, keyboard
+
+        text = header
+        chart_buttons: list[list[InlineKeyboardButton]] = []
+        for p in positions:
+            side_emoji = "🟢" if p["side"] == "buy" else "🔴"
+            pnl_emoji = "🟢" if p["pnl_pct"] >= 0 else "🔴"
+            age_str = self._fmt_age(p["age_seconds"])
+            current_str = f"{p['current_price']:,.2f}" if p["current_price_ok"] else f"{p['current_price']:,.2f} (n/a)"
+
+            text += f"{side_emoji} {p['side_label']} · {p['symbol']} {p['timeframe']}\n"
+            text += f"   Стратегия: {paper_trader._account_title(paper_trader.accounts[p['account_id']])}\n"
+            text += f"   Вход: ${p['entry_price']:,.2f}  →  Сейчас: ${current_str}\n"
+            text += (
+                f"   {pnl_emoji} PnL: {p['pnl_dollars']:+,.2f}$ ({p['pnl_pct']:+.2f}%)"
+            )
+            if p["leverage"] and p["leverage"] != 1:
+                text += f"  ·  плечо ×{p['leverage']}"
+            text += "\n"
+            text += (
+                f"   🛡 SL: ${p['sl_price']:,.2f} ({p['distance_to_sl_pct']:+.2f}%)"
+                f"  ·  🎯 TP: ${p['tp_price']:,.2f} ({p['distance_to_tp_pct']:+.2f}%)\n"
+            )
+            text += f"   ⏱ В позиции: {age_str}\n\n"
+
+            chart_buttons.append([InlineKeyboardButton(
+                f"📈 График: {p['side_label']} {p['symbol']}",
+                callback_data=f"position_chart_{p['account_id']}",
+            )])
+
+        if len(text) > 4000:
+            text = text[:3950] + "\n\n... обрезано"
+
+        keyboard = InlineKeyboardMarkup(
+            chart_buttons + [
+                [InlineKeyboardButton("🔄 Обновить", callback_data="positions_refresh")],
+                [InlineKeyboardButton("◀️ Главное меню", callback_data="back_main")],
+            ]
+        )
+        return text, keyboard
+
+    @staticmethod
+    def _fmt_age(seconds: Optional[int]) -> str:
+        if seconds is None:
+            return "—"
+        if seconds < 60:
+            return f"{seconds}с"
+        if seconds < 3600:
+            return f"{seconds // 60} мин"
+        if seconds < 86400:
+            h = seconds // 3600
+            m = (seconds % 3600) // 60
+            return f"{h}ч {m}м" if m else f"{h}ч"
+        d = seconds // 86400
+        h = (seconds % 86400) // 3600
+        return f"{d}д {h}ч" if h else f"{d}д"
+
+    async def _send_position_chart(self, query, user_id: int, account_id: str) -> None:
+        """Рисует график позиции и отправляет картинкой. Возвращает в раздел кнопкой."""
+        paper_trader = getattr(self.engine, "paper_trader", None)
+        db = self.engine.db
+        if not paper_trader or not db:
+            await query.message.reply_text("📡 Paper Trading не запущен")
+            return
+
+        # Доступ: только если пользователь подписан на эту стратегию
+        subs = await db.get_user_subscriptions(user_id)
+        sub_ids = {s["account_id"] for s in subs}
+        if account_id not in sub_ids:
+            await query.message.reply_text("⛔ У вас нет доступа к этой стратегии")
+            return
+
+        chart_data = await paper_trader.fetch_chart_data(account_id, candles=80)
+        if not chart_data:
+            await query.message.reply_text(
+                "Не удалось получить данные для графика — позиция уже закрыта или сеть упала.\n"
+                "Попробуй ещё раз через минуту.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ К позициям", callback_data="positions")],
+                ]),
+            )
+            return
+
+        try:
+            from bot.position_chart import render_position_chart
+            png_bytes = render_position_chart(
+                ohlcv=chart_data["ohlcv"],
+                trade=chart_data["trade"],
+                current_price=chart_data["current_price"],
+                title=chart_data["title"],
+                symbol=chart_data["symbol"],
+                timeframe=chart_data["timeframe"],
+            )
+        except Exception as e:
+            logger.exception(f"Ошибка рендера графика для {account_id}: {e}")
+            await query.message.reply_text(
+                f"Ошибка при построении графика: {type(e).__name__}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ К позициям", callback_data="positions")],
+                ]),
+            )
+            return
+
+        # Caption с кратким PnL — чтобы было видно прямо под картинкой
+        positions = await paper_trader.get_open_positions_detail(account_ids={account_id})
+        caption_lines = []
+        if positions:
+            p = positions[0]
+            pnl_emoji = "🟢" if p["pnl_pct"] >= 0 else "🔴"
+            caption_lines.append(f"{p['side_label']} · {p['symbol']} {p['timeframe']}")
+            caption_lines.append(
+                f"Вход ${p['entry_price']:,.2f} → ${p['current_price']:,.2f}"
+            )
+            caption_lines.append(
+                f"{pnl_emoji} {p['pnl_dollars']:+,.2f}$ ({p['pnl_pct']:+.2f}%)"
+            )
+        caption = "\n".join(caption_lines) if caption_lines else None
+
+        import io as _io
+        from telegram import InputMediaPhoto
+
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Обновить график", callback_data=f"position_chart_{account_id}")],
+            [InlineKeyboardButton("◀️ К позициям", callback_data="positions")],
+        ])
+
+        # Если текущее сообщение уже фото (значит это refresh) — заменяем его, чтобы не плодить
+        # картинки в чате. Иначе шлём новое.
+        msg = query.message
+        if getattr(msg, "photo", None):
+            try:
+                await query.edit_message_media(
+                    media=InputMediaPhoto(media=_io.BytesIO(png_bytes), caption=caption),
+                    reply_markup=markup,
+                )
+                return
+            except BadRequest as e:
+                # Если по какой-то причине не получилось заменить (например, картинка идентична) —
+                # тихо игнорируем и шлём новое
+                if "not modified" not in str(e).lower():
+                    logger.warning(f"edit_message_media fail: {e}; fallback to reply_photo")
+
+        await msg.reply_photo(
+            photo=_io.BytesIO(png_bytes),
+            caption=caption,
+            reply_markup=markup,
+        )
 
     async def _format_history_v3(self, user_id: int) -> str:
         """История сигналов: последние сделки только по подписанным стратегиям."""

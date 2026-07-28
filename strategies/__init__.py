@@ -18,6 +18,9 @@ from strategies.stochrsi_scalper import StochRsiScalperStrategy
 from strategies.scalp_ema_macd import ScalpEmaMacdStrategy
 from strategies.micro_breakout import MicroBreakoutStrategy
 from strategies.combined_regime import CombinedRegimeStrategy, PureFakeBreakoutStrategy
+from strategies.scalp_rsi_reversion import ScalpRsiReversionStrategy
+from strategies.scalp_ema_volume import ScalpEmaVolumeStrategy
+from strategies.scalp_donchian_filt import ScalpDonchianFiltStrategy
 
 STRATEGY_MAP = {
     "ema_crossover": EmaCrossoverStrategy,
@@ -40,6 +43,9 @@ STRATEGY_MAP = {
     "micro_breakout": MicroBreakoutStrategy,
     "combined_regime": CombinedRegimeStrategy,
     "pure_fake_breakout": PureFakeBreakoutStrategy,
+    "scalp_rsi_mr": ScalpRsiReversionStrategy,
+    "scalp_ema_vol": ScalpEmaVolumeStrategy,
+    "scalp_donchian_filt": ScalpDonchianFiltStrategy,
 }
 
 __all__ = [

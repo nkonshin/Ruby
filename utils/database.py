@@ -6,7 +6,7 @@ SQLite база данных для хранения сделок, состоя�
 import aiosqlite
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -103,8 +103,73 @@ class Database:
             );
 
             CREATE INDEX IF NOT EXISTS idx_subs_account ON user_subscriptions(account_id);
+
+            -- Очередь алертов для health-monitor: при отвале связи (VPN/Telegram)
+            -- сообщения пишутся сюда и ретраятся на следующих тиках.
+            CREATE TABLE IF NOT EXISTS pending_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_attempt_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                delivered_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_alerts_user_undelivered
+                ON pending_alerts(user_id, delivered_at);
         """)
         await self._db.commit()
+
+    # === Pending alerts (health monitor durability) ===
+
+    async def enqueue_alert(self, user_id: int, text: str) -> int:
+        cursor = await self._db.execute(
+            "INSERT INTO pending_alerts (user_id, text, created_at) VALUES (?, ?, ?)",
+            (user_id, text, datetime.utcnow().isoformat()),
+        )
+        await self._db.commit()
+        return cursor.lastrowid
+
+    async def get_undelivered_alerts(self, user_id: int, limit: int = 50) -> list[dict]:
+        async with self._db.execute(
+            "SELECT id, user_id, text, created_at, attempts, last_attempt_at "
+            "FROM pending_alerts WHERE user_id = ? AND delivered_at IS NULL "
+            "ORDER BY id ASC LIMIT ?",
+            (user_id, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def count_undelivered_alerts(self, user_id: int) -> int:
+        async with self._db.execute(
+            "SELECT COUNT(*) FROM pending_alerts WHERE user_id = ? AND delivered_at IS NULL",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    async def mark_alert_delivered(self, alert_id: int) -> None:
+        await self._db.execute(
+            "UPDATE pending_alerts SET delivered_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), alert_id),
+        )
+        await self._db.commit()
+
+    async def record_alert_attempt(self, alert_id: int) -> None:
+        await self._db.execute(
+            "UPDATE pending_alerts SET attempts = attempts + 1, last_attempt_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), alert_id),
+        )
+        await self._db.commit()
+
+    async def cleanup_delivered_alerts(self, older_than_days: int = 7) -> int:
+        cutoff = (datetime.utcnow() - timedelta(days=older_than_days)).isoformat()
+        cursor = await self._db.execute(
+            "DELETE FROM pending_alerts WHERE delivered_at IS NOT NULL AND delivered_at < ?",
+            (cutoff,),
+        )
+        await self._db.commit()
+        return cursor.rowcount or 0
 
     # === Trades ===
 

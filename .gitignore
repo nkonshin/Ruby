@@ -22,3 +22,9 @@ data/llm_cache/
 /backtest-report-v3.pdf
 /crypto-bot-update-v2.pdf
 /crypto-bot-v3-readme.pdf
+
+# Исследовательские данные (34MB выгрузок), код research/ версионируется
+research/data/
+
+# Серверный оверрайд compose — специфичен для VPS, в репозитории не нужен
+docker-compose.override.yml

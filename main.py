@@ -15,7 +15,8 @@ import logging
 import argparse
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional
 
 from config import settings, StrategyName
 from bot.engine import TradingEngine
@@ -163,7 +164,9 @@ async def _migrate_users_v3(db, settings, main_user_id):
             is_admin=True, added_by=None,
         )
         for cfg in LIVE_PAPER_CONFIGS:
-            await db.subscribe(main_user_id, cfg["account_id"], initial_balance=10000.0, from_start=True)
+            await db.subscribe(main_user_id, cfg["account_id"],
+                                initial_balance=cfg.get("initial_balance", 10000.0),
+                                from_start=True)
         logger.info(f"v3: main admin {main_user_id} добавлен, подписан на все стратегии")
 
     # Остальные пользователи — подписаны только на signal (notify_users=all в конфиге)
@@ -177,30 +180,126 @@ async def _migrate_users_v3(db, settings, main_user_id):
         logger.info(f"v3: user {uid} добавлен, подписан на {len(signal_accounts)} signal-стратегий")
 
 
-async def _health_monitor_loop(paper_trader, notify_user_fn, admin_uid):
+async def _subscribe_new_accounts(db, main_user_id):
     """
-    Раз в час проверяет health_check. Если есть проблемы — алерт админу.
-    Алерт не дублируется: если проблема та же что в прошлый раз — не шлём повторно.
+    Идемпотентная миграция при каждом запуске: подписывает админа на новые конфиги
+    которые ещё не подписаны. Запускается ПОСЛЕ _migrate_users_v3.
+
+    Это нужно когда добавляем новые аккаунты после первой миграции (например scalp_pack).
+    Юзеры (не админ) НЕ получают подписки на новые admin_only / main_only аккаунты — только админ.
+    """
+    from bot.paper_trader import LIVE_PAPER_CONFIGS
+
+    if not main_user_id:
+        return
+
+    admin_subs = await db.get_user_subscriptions(main_user_id)
+    admin_account_ids = {s["account_id"] for s in admin_subs}
+
+    new_admin_subs = 0
+    for cfg in LIVE_PAPER_CONFIGS:
+        acc_id = cfg["account_id"]
+        if acc_id not in admin_account_ids:
+            await db.subscribe(
+                main_user_id, acc_id,
+                initial_balance=cfg.get("initial_balance", 10000.0),
+                from_start=True,
+            )
+            new_admin_subs += 1
+            logger.info(f"  + admin подписан на новый аккаунт: {acc_id}")
+    if new_admin_subs:
+        logger.info(f"v3: admin получил {new_admin_subs} новых подписок (всего конфигов {len(LIVE_PAPER_CONFIGS)})")
+
+
+async def _check_telegram_api(app, timeout: float = 6.0) -> tuple[bool, Optional[str]]:
+    """
+    Прямая проверка доступности Telegram Bot API через get_me().
+    Возвращает (ok, error_message). Используется health monitor'ом, чтобы
+    отличать «вообще нет связи» от «данные с биржи не приходят».
+    """
+    try:
+        await asyncio.wait_for(app.bot.get_me(), timeout=timeout)
+        return True, None
+    except asyncio.TimeoutError:
+        return False, f"timeout >{timeout:.0f}s"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+async def _flush_pending_alerts(db, notify_user_fn, admin_uid: int) -> int:
+    """
+    Шлёт накопленные недоставленные алерты по порядку. При первом фейле останавливается
+    (нет смысла стучаться дальше — канал лежит). Возвращает количество доставленных.
+    """
+    pending = await db.get_undelivered_alerts(admin_uid, limit=50)
+    if not pending:
+        return 0
+    delivered = 0
+    for row in pending:
+        ok = await notify_user_fn(admin_uid, row["text"])
+        if ok:
+            await db.mark_alert_delivered(row["id"])
+            delivered += 1
+        else:
+            await db.record_alert_attempt(row["id"])
+            break  # канал всё ещё лежит — остальные подождут до следующего тика
+    if delivered:
+        logger.info(f"Health monitor: доставлено {delivered} pending алертов из очереди")
+    return delivered
+
+
+async def _send_or_queue(db, notify_user_fn, admin_uid: int, text: str) -> bool:
+    """Отправляет алерт сразу. Если канал лежит — кладёт в очередь и возвращает False."""
+    ok = await notify_user_fn(admin_uid, text)
+    if not ok:
+        await db.enqueue_alert(admin_uid, text)
+        logger.warning("Health monitor: алерт не доставлен — поставлен в очередь")
+    return ok
+
+
+async def _health_monitor_loop(paper_trader, db, app, notify_user_fn, admin_uid):
+    """
+    Раз в час:
+      1. Проверяет Telegram API напрямую (get_me) и обновляет статус в paper_trader
+      2. Дренирует очередь pending_alerts (доставка ранее накопленных)
+      3. Делает health_check, при проблемах формирует алерт.
+         При фейле доставки алерт уходит в pending_alerts — следующий тик повторит.
+    Алерт не дублируется: те же проблемы не ре-шлются раньше 6ч.
     """
     if not admin_uid:
         logger.warning("Health monitor: admin_uid не задан, алерты не будут отправляться")
         return
 
-    await asyncio.sleep(300)  # Первая проверка через 5 минут после старта (дать стратегиям время)
+    await asyncio.sleep(300)  # Первая проверка через 5 минут после старта
 
     last_alert_issues: set = set()
-    last_alert_sent_at = None
+    last_alert_sent_at: Optional[datetime] = None
 
     while True:
         try:
+            # 1. Проверка Telegram API канала
+            tg_ok, tg_err = await _check_telegram_api(app)
+
+            # 2. Подсчёт текущей очереди + дренаж если канал жив
+            pending_before = await db.count_undelivered_alerts(admin_uid)
+            if tg_ok and pending_before:
+                await _flush_pending_alerts(db, notify_user_fn, admin_uid)
+            pending_after = await db.count_undelivered_alerts(admin_uid)
+
+            # Прокидываем статус во внутреннее состояние paper_trader (для health_check + UI)
+            paper_trader.update_external_status(
+                telegram_api_ok=tg_ok,
+                telegram_api_error=tg_err,
+                pending_alerts_count=pending_after,
+            )
+
+            # 3. Health check теперь видит и Telegram API, и очередь
             hc = paper_trader.health_check()
             current_issues = set(hc["issues"])
 
+            now = datetime.utcnow()
             if current_issues:
-                # Алерт если: новые проблемы ИЛИ прошло >6 часов с последнего алерта
                 new_issues = current_issues - last_alert_issues
-                from datetime import datetime, timedelta
-                now = datetime.utcnow()
                 time_since_last = (now - last_alert_sent_at) if last_alert_sent_at else timedelta(days=999)
                 should_alert = bool(new_issues) or time_since_last > timedelta(hours=6)
 
@@ -210,22 +309,21 @@ async def _health_monitor_loop(paper_trader, notify_user_fn, admin_uid):
                     for issue in hc["issues"]:
                         msg += f"• {issue}\n"
                     msg += "\nПроверь логи на сервере или нажми «📈 Мониторинг» в админ-панели."
-                    try:
-                        await notify_user_fn(admin_uid, msg)
-                        last_alert_sent_at = now
-                        last_alert_issues = current_issues
+                    delivered = await _send_or_queue(db, notify_user_fn, admin_uid, msg)
+                    last_alert_sent_at = now
+                    last_alert_issues = current_issues
+                    if delivered:
                         logger.warning(f"Health monitor: отправлен алерт админу ({len(hc['issues'])} проблем)")
-                    except Exception as e:
-                        logger.error(f"Health monitor: не удалось отправить алерт: {e}")
+                    else:
+                        logger.warning(
+                            f"Health monitor: алерт ({len(hc['issues'])} проблем) в очереди, "
+                            f"будет доставлен после восстановления Telegram API"
+                        )
             else:
-                # Если ранее был алерт, и сейчас всё ок — сообщаем о восстановлении
                 if last_alert_issues:
                     msg = "✅ Восстановление — проблемы устранены\n━━━━━━━━━━━━━━━━━━━━\nБот снова работает штатно."
-                    try:
-                        await notify_user_fn(admin_uid, msg)
-                        logger.info("Health monitor: отправлено уведомление о восстановлении")
-                    except Exception as e:
-                        logger.error(f"Health monitor: recovery notify fail: {e}")
+                    await _send_or_queue(db, notify_user_fn, admin_uid, msg)
+                    logger.info("Health monitor: отправлено уведомление о восстановлении")
                     last_alert_issues = set()
                     last_alert_sent_at = None
 
@@ -237,8 +335,37 @@ async def _health_monitor_loop(paper_trader, notify_user_fn, admin_uid):
         await asyncio.sleep(3600)  # Раз в час
 
 
+async def _wait_for_network(timeout_total: int = 180, check_interval: int = 5) -> bool:
+    """
+    Ждёт доступности Telegram API перед стартом бота. Переживает race с VPN на ребуте:
+    после ребута sing-box поднимает туннель ~30-60с, а бот стартует сразу — без ожидания
+    get_me() падал бы с NetworkError.
+    """
+    import aiohttp
+    import time as _time
+    deadline = _time.monotonic() + timeout_total
+    attempt = 0
+    while _time.monotonic() < deadline:
+        attempt += 1
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.get("https://api.telegram.org/") as r:
+                    if r.status in (200, 301, 302, 401, 404):
+                        logger.info(f"Сеть готова (попытка {attempt}, Telegram HTTP {r.status})")
+                        return True
+        except Exception as e:
+            logger.warning(f"Сеть не готова, ждём VPN (попытка {attempt}): {type(e).__name__}")
+        await asyncio.sleep(check_interval)
+    logger.error(f"Telegram API недоступен за {timeout_total}с — стартуем как есть (watchdog поднимет VPN)")
+    return False
+
+
 async def run_with_telegram(engine: TradingEngine) -> None:
     """Запуск с Telegram ботом + Paper Trader."""
+    # Pre-flight: дождаться готовности сети (VPN мог ещё не подняться после ребута)
+    await _wait_for_network()
+
     telegram = TelegramBot(settings, engine)
     app = telegram.build()
 
@@ -254,12 +381,15 @@ async def run_with_telegram(engine: TradingEngine) -> None:
 
     main_user_id = settings.main_user_id
 
-    async def notify_user(user_id: int, text: str):
-        """Отправляет уведомление конкретному пользователю."""
+    async def notify_user(user_id: int, text: str) -> bool:
+        """Отправляет уведомление пользователю. Возвращает True/False для health monitor.
+        False означает, что вызывающая сторона должна сама решить — ретраить или класть в очередь."""
         try:
             await app.bot.send_message(chat_id=user_id, text=text)
+            return True
         except Exception as e:
             logger.error(f"Ошибка отправки {user_id}: {e}")
+            return False
 
     paper_trader = PaperTrader(db=paper_db, notify_user_callback=notify_user)
 
@@ -267,6 +397,8 @@ async def run_with_telegram(engine: TradingEngine) -> None:
     # Главный юзер (я) — admin, подписан на все стратегии
     # Остальные из TELEGRAM_ALLOWED_USERS — подписаны только на signal-стратегии
     await _migrate_users_v3(paper_db, settings, main_user_id)
+    # Идемпотентная подписка админа на любые новые аккаунты (для scalp_pack и future-конфигов)
+    await _subscribe_new_accounts(paper_db, main_user_id)
 
     # Сохраняем paper_trader в engine для доступа из Telegram UI
     engine.paper_trader = paper_trader
@@ -281,12 +413,13 @@ async def run_with_telegram(engine: TradingEngine) -> None:
         paper_task = asyncio.create_task(paper_trader.run(), name="paper_trader")
         logger.info("Paper Trader запущен параллельно")
 
-        # Health monitor: раз в час проверяет состояние и алертит админу
+        # Health monitor: раз в час проверяет Telegram API + аккаунты, шлёт алерт админу
+        # с очередью на случай отвала канала (см. pending_alerts в БД)
         monitor_task = asyncio.create_task(
-            _health_monitor_loop(paper_trader, notify_user, main_user_id),
+            _health_monitor_loop(paper_trader, paper_db, app, notify_user, main_user_id),
             name="health_monitor",
         )
-        logger.info("Health monitor запущен (раз в час)")
+        logger.info("Health monitor запущен (раз в час, с очередью pending_alerts)")
 
         try:
             while engine._running:

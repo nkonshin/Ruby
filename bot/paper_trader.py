@@ -41,7 +41,9 @@ class PaperAccount:
                  initial_balance: float = 100.0, leverage: int = 5,
                  risk_pct: float = 2.0, use_entry_filters: bool = True,
                  signal_only: bool = False, notify_users: str = "all",
-                 min_sl_pct: float = 0.0, min_tp_pct: float = 0.0):
+                 min_sl_pct: float = 0.0, min_tp_pct: float = 0.0,
+                 market: str = "spot", pack: Optional[str] = None,
+                 fixed_position_cost: Optional[float] = None):
         self.account_id = account_id
         self.strategy = strategy
         self.symbol = symbol
@@ -51,9 +53,18 @@ class PaperAccount:
         self.risk_pct = risk_pct
         self.use_entry_filters = use_entry_filters
         self.signal_only = signal_only  # True = only-long, FULL position, warning на шорт
-        self.notify_users = notify_users  # "all" | "main_only"
+        # "all" | "main_only" | "admin_only"
+        # admin_only = подписка только у админа; в UI не видна обычным юзерам
+        self.notify_users = notify_users
         self.min_sl_pct = min_sl_pct
         self.min_tp_pct = min_tp_pct
+        # Market: "spot" (api.binance.com) или "futures" (fapi.binance.com).
+        # Для scalp-конфигов используем futures — это и есть базис для бэктестов.
+        self.market = market
+        # Tag для группировки аккаунтов в UI (например "scalp_pack")
+        self.pack = pack
+        # Фиксированный размер позиции в долларах (бьёт risk_pct). Для scalp-конфигов из бэктеста.
+        self.fixed_position_cost = fixed_position_cost
         self.open_trade: Optional[dict] = None
         self.trades_history: list[dict] = []
         self.total_pnl: float = 0.0
@@ -70,9 +81,10 @@ class PaperAccount:
 
     @property
     def equity(self) -> float:
-        """Общий капитал: свободный баланс + стоимость открытой позиции."""
+        """Общий капитал: свободный баланс + стоимость открытой позиции.
+        В notional_mode (scalp) баланс при открытии не вычитался, поэтому cost не добавляем."""
         e = self.balance
-        if self.open_trade:
+        if self.open_trade and not self.open_trade.get("notional_mode"):
             e += self.open_trade.get("cost", 0)
         return e
 
@@ -228,6 +240,107 @@ LIVE_PAPER_CONFIGS = [
             "fake_wick_pct": 0.5,
         },
     },
+
+    # ===== SCALP PACK (admin-only) =====
+    # Источник: research/REPORT.md, walk-forward ROBUST конфиги.
+    # Общий виртуальный пул $200 (5 × $40). Данные с Binance Futures.
+    # notional пропорциональны бэктесту ($3000 → $600, $1250 → $250).
+
+    # #6: PEPE × RSI MR 15m — топ по бэктесту (+354% IS, +35% OOS/15д)
+    {
+        "account_id": "scalp_pepe_rsi_15m",
+        "pack": "scalp_pack",
+        "strategy_name": "scalp_rsi_mr",
+        "symbol": "1000PEPE/USDT",
+        "timeframe": "15m",
+        "market": "futures",
+        "initial_balance": 40.0,
+        "leverage": 15,
+        "risk_pct": 2.0,
+        "fixed_position_cost": 600.0,
+        "use_optimized_params": False,
+        "use_entry_filters": False,
+        "signal_only": False,
+        "notify_users": "admin_only",
+        "strategy_kwargs": {"oversold": 25, "overbought": 75,
+                            "sl_atr_mult": 2.5, "tp_atr_mult": 4.0},
+    },
+    # #7: ATOM × RSI MR 15m (+158% IS, +46% OOS/15д — лучший OOS)
+    {
+        "account_id": "scalp_atom_rsi_15m",
+        "pack": "scalp_pack",
+        "strategy_name": "scalp_rsi_mr",
+        "symbol": "ATOM/USDT",
+        "timeframe": "15m",
+        "market": "futures",
+        "initial_balance": 40.0,
+        "leverage": 15,
+        "risk_pct": 2.0,
+        "fixed_position_cost": 600.0,
+        "use_optimized_params": False,
+        "use_entry_filters": False,
+        "signal_only": False,
+        "notify_users": "admin_only",
+        "strategy_kwargs": {"oversold": 25, "overbought": 75,
+                            "sl_atr_mult": 2.5, "tp_atr_mult": 4.0},
+    },
+    # #8: RENDER × RSI MR 15m (+285% IS, +19% OOS/15д)
+    {
+        "account_id": "scalp_render_rsi_15m",
+        "pack": "scalp_pack",
+        "strategy_name": "scalp_rsi_mr",
+        "symbol": "RENDER/USDT",
+        "timeframe": "15m",
+        "market": "futures",
+        "initial_balance": 40.0,
+        "leverage": 15,
+        "risk_pct": 2.0,
+        "fixed_position_cost": 600.0,
+        "use_optimized_params": False,
+        "use_entry_filters": False,
+        "signal_only": False,
+        "notify_users": "admin_only",
+        "strategy_kwargs": {"oversold": 25, "overbought": 75,
+                            "sl_atr_mult": 2.5, "tp_atr_mult": 3.0},
+    },
+    # #9: TON × Donchian filtered 15m (+108% IS, +10% OOS/15д)
+    {
+        "account_id": "scalp_ton_donchian_15m",
+        "pack": "scalp_pack",
+        "strategy_name": "scalp_donchian_filt",
+        "symbol": "TON/USDT",
+        "timeframe": "15m",
+        "market": "futures",
+        "initial_balance": 40.0,
+        "leverage": 6,
+        "risk_pct": 2.0,
+        "fixed_position_cost": 250.0,
+        "use_optimized_params": False,
+        "use_entry_filters": False,
+        "signal_only": False,
+        "notify_users": "admin_only",
+        "strategy_kwargs": {"lookback": 20, "adx_min": 25,
+                            "sl_atr_mult": 2.5, "tp_atr_mult": 3.0},
+    },
+    # #10: LINK × EMA Volume 15m (+65% IS, +10% OOS/15д)
+    {
+        "account_id": "scalp_link_emavol_15m",
+        "pack": "scalp_pack",
+        "strategy_name": "scalp_ema_vol",
+        "symbol": "LINK/USDT",
+        "timeframe": "15m",
+        "market": "futures",
+        "initial_balance": 40.0,
+        "leverage": 6,
+        "risk_pct": 2.0,
+        "fixed_position_cost": 250.0,
+        "use_optimized_params": False,
+        "use_entry_filters": False,
+        "signal_only": False,
+        "notify_users": "admin_only",
+        "strategy_kwargs": {"fast": 9, "slow": 21, "vol_mult": 1.5,
+                            "sl_atr_mult": 2.5, "tp_atr_mult": 4.0},
+    },
 ]
 
 
@@ -248,6 +361,29 @@ class PaperTrader:
         # Переиспользуемый CCXT клиент (чтобы не тащить exchangeInfo каждый раз)
         self._exchange = None
         self._exchange_lock = asyncio.Lock()
+        # Состояние внешних каналов (обновляется health monitor'ом из main.py)
+        self.telegram_api_ok: Optional[bool] = None
+        self.telegram_api_checked_at: Optional[datetime] = None
+        self.telegram_api_error: Optional[str] = None
+        self.pending_alerts_count: int = 0
+        # Кэш текущих цен — чтобы рапид-клики «обновить» в UI не били по Binance
+        self._price_cache: dict[str, tuple[float, datetime]] = {}
+        self._price_cache_ttl = timedelta(seconds=30)
+
+    def update_external_status(
+        self,
+        *,
+        telegram_api_ok: Optional[bool] = None,
+        telegram_api_error: Optional[str] = None,
+        pending_alerts_count: Optional[int] = None,
+    ) -> None:
+        """Вызывается из health_monitor_loop для обновления статуса внешних каналов."""
+        if telegram_api_ok is not None:
+            self.telegram_api_ok = telegram_api_ok
+            self.telegram_api_checked_at = datetime.utcnow()
+            self.telegram_api_error = telegram_api_error
+        if pending_alerts_count is not None:
+            self.pending_alerts_count = pending_alerts_count
 
     async def start(self) -> None:
         """Инициализация аккаунтов и восстановление состояния."""
@@ -278,6 +414,9 @@ class PaperTrader:
                 notify_users=config.get("notify_users", "all"),
                 min_sl_pct=config.get("min_sl_pct", 0.0),
                 min_tp_pct=config.get("min_tp_pct", 0.0),
+                market=config.get("market", "spot"),
+                pack=config.get("pack"),
+                fixed_position_cost=config.get("fixed_position_cost"),
             )
 
             # Восстанавливаем состояние из БД
@@ -441,30 +580,170 @@ class PaperTrader:
                 continue
         raise last_exc  # type: ignore[misc]
 
-    async def _fetch_data(self, symbol: str, timeframe: str, limit: int = 300) -> list:
+    @staticmethod
+    def _api_base(market: str) -> tuple[str, str]:
+        """Возвращает (klines_url, ticker_url) для указанного рынка."""
+        if market == "futures":
+            return (
+                "https://fapi.binance.com/fapi/v1/klines",
+                "https://fapi.binance.com/fapi/v1/ticker/price",
+            )
+        return (
+            "https://api.binance.com/api/v3/klines",
+            "https://api.binance.com/api/v3/ticker/price",
+        )
+
+    async def _fetch_data(self, symbol: str, timeframe: str, limit: int = 300,
+                           *, market: str = "spot") -> list:
         """
-        Загружает свечи напрямую из Binance spot API (без CCXT).
+        Загружает свечи. По умолчанию Spot API; market="futures" → fapi.binance.com.
         Возвращает список [[ts, open, high, low, close, volume], ...]
         """
+        klines_url, _ = self._api_base(market)
         data = await self._http_get_json(
-            "https://api.binance.com/api/v3/klines",
+            klines_url,
             {"symbol": self._ccxt_symbol_to_binance(symbol), "interval": timeframe, "limit": limit},
         )
         return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in data]
 
-    async def _fetch_price(self, symbol: str) -> float:
-        """Текущая цена (напрямую из Binance spot API)."""
+    async def _fetch_price(self, symbol: str, *, market: str = "spot") -> float:
+        """Текущая цена. Spot или Futures в зависимости от market."""
+        _, ticker_url = self._api_base(market)
         data = await self._http_get_json(
-            "https://api.binance.com/api/v3/ticker/price",
+            ticker_url,
             {"symbol": self._ccxt_symbol_to_binance(symbol)},
         )
         return float(data["price"])
+
+    async def fetch_price_cached(self, symbol: str, *, market: str = "spot") -> float:
+        """Цена с кэшем (TTL 30с). Для UI-сценариев, чтобы клики «обновить» не били Binance."""
+        cache_key = f"{market}:{symbol}"
+        cached = self._price_cache.get(cache_key)
+        now = datetime.utcnow()
+        if cached and (now - cached[1]) < self._price_cache_ttl:
+            return cached[0]
+        price = await self._fetch_price(symbol, market=market)
+        self._price_cache[cache_key] = (price, now)
+        return price
+
+    async def get_open_positions_detail(self, account_ids: Optional[set[str]] = None) -> list[dict]:
+        """
+        Возвращает детальную информацию по всем открытым позициям. Если задано account_ids —
+        фильтр (используется UI для подписок). Текущую цену тянем из кэша → на массовый клик
+        «Обновить» не делаем 5 параллельных fetch'ей.
+        """
+        result = []
+        for acc in self.accounts.values():
+            if account_ids is not None and acc.account_id not in account_ids:
+                continue
+            t = acc.open_trade
+            if not t:
+                continue
+            symbol = acc.symbol
+            try:
+                current = await self.fetch_price_cached(symbol, market=acc.market)
+                price_ok = True
+                price_err: Optional[str] = None
+            except Exception as e:
+                # Не падаем — отдаём last-known entry, помечаем что цена не получена
+                current = t["entry_price"]
+                price_ok = False
+                price_err = f"{type(e).__name__}: {e}"
+
+            entry = t["entry_price"]
+            sl = t["sl_price"]
+            tp = t["tp_price"]
+            side = t["side"]  # "buy" / "sell"
+            cost = t.get("cost", 0.0)
+            notional_mode = t.get("notional_mode", False)
+            leverage = acc.leverage
+
+            if side == "buy":
+                pnl_pct_raw = (current - entry) / entry * 100  # без плеча
+                dist_to_sl_pct = (sl - current) / current * 100
+                dist_to_tp_pct = (tp - current) / current * 100
+            else:
+                pnl_pct_raw = (entry - current) / entry * 100
+                dist_to_sl_pct = (current - sl) / current * 100
+                dist_to_tp_pct = (current - tp) / current * 100
+
+            if notional_mode:
+                # cost = полный notional, плечо «внутри». $-PnL = move% × notional.
+                pnl_dollars = cost * (pnl_pct_raw / 100.0)
+                pnl_pct_lev = pnl_dollars / acc.initial_balance * 100  # % от депозита
+            else:
+                pnl_pct_lev = pnl_pct_raw * leverage
+                pnl_dollars = cost * (pnl_pct_lev / 100.0)
+
+            opened_at = None
+            age_seconds: Optional[int] = None
+            try:
+                opened_at = datetime.fromisoformat(t["opened_at"])
+                age_seconds = int((datetime.utcnow() - opened_at).total_seconds())
+            except (KeyError, ValueError, TypeError):
+                pass
+
+            result.append({
+                "account_id": acc.account_id,
+                "symbol": symbol,
+                "timeframe": acc.strategy.timeframe,
+                "side": side,
+                "side_label": "LONG" if side == "buy" else "SHORT",
+                "entry_price": entry,
+                "current_price": current,
+                "current_price_ok": price_ok,
+                "current_price_error": price_err,
+                "sl_price": sl,
+                "tp_price": tp,
+                "sl_pct": t.get("sl_pct"),
+                "tp_pct": t.get("tp_pct"),
+                "pnl_pct": pnl_pct_lev,
+                "pnl_dollars": pnl_dollars,
+                "distance_to_sl_pct": dist_to_sl_pct,
+                "distance_to_tp_pct": dist_to_tp_pct,
+                "position_cost": cost,
+                "leverage": leverage,
+                "amount": t.get("amount", 0.0),
+                "opened_at": opened_at.isoformat() if opened_at else None,
+                "age_seconds": age_seconds,
+                "reason": t.get("reason"),
+                "signal_only": acc.signal_only,
+            })
+        return result
+
+    async def fetch_chart_data(self, account_id: str, candles: int = 120) -> Optional[dict]:
+        """
+        Собирает данные для графика позиции: свечи + параметры открытой сделки.
+        Возвращает None если позиции нет или не удалось получить свечи.
+        """
+        acc = self.accounts.get(account_id)
+        if not acc or not acc.open_trade:
+            return None
+        try:
+            ohlcv = await self._fetch_data(acc.symbol, acc.strategy.timeframe,
+                                            limit=candles, market=acc.market)
+        except Exception as e:
+            logger.warning(f"[{account_id}] fetch_chart_data: не удалось получить свечи: {e}")
+            return None
+        try:
+            current = await self.fetch_price_cached(acc.symbol, market=acc.market)
+        except Exception:
+            current = float(ohlcv[-1][4]) if ohlcv else acc.open_trade["entry_price"]
+        return {
+            "symbol": acc.symbol,
+            "timeframe": acc.strategy.timeframe,
+            "ohlcv": ohlcv,
+            "trade": acc.open_trade,
+            "current_price": current,
+            "title": self._account_title(acc),
+        }
 
     async def _run_analysis(self, account: PaperAccount) -> None:
         """Анализ стратегии и открытие/закрытие позиций."""
         ohlcv = await self._fetch_data(
             account.symbol, account.strategy.timeframe,
             limit=max(account.strategy.min_candles + 50, 300),
+            market=account.market,
         )
         if not ohlcv or len(ohlcv) < account.strategy.min_candles:
             self._add_log(account, "no_data", "Недостаточно данных", {})
@@ -533,9 +812,13 @@ class PaperTrader:
             tp_pct = sl_pct * 2
 
         # Position sizing:
+        # - fixed_position_cost: фиксированный notional (scalp-конфиги из бэктеста)
         # - signal_only: FULL position (95% баланса), leverage 1
         # - обычный: risk_amount / SL%
-        if account.signal_only:
+        if account.fixed_position_cost is not None:
+            position_cost = float(account.fixed_position_cost)
+            amount = position_cost / price
+        elif account.signal_only:
             position_cost = account.balance * 0.95
             amount = position_cost * account.leverage / price
         else:
@@ -551,6 +834,9 @@ class PaperTrader:
             sl_price = price * (1 + sl_pct / 100)
             tp_price = price * (1 - tp_pct / 100)
 
+        # notional_mode: для scalp-аккаунтов cost = полный размер позиции (notional),
+        # PnL считается без ×leverage, баланс при открытии НЕ вычитается (маржинальная модель)
+        notional_mode = account.fixed_position_cost is not None
         account.open_trade = {
             "side": signal.type.value,
             "entry_price": price,
@@ -562,8 +848,10 @@ class PaperTrader:
             "tp_pct": tp_pct,
             "reason": signal.reason,
             "opened_at": datetime.utcnow().isoformat(),
+            "notional_mode": notional_mode,
         }
-        account.balance -= position_cost
+        if not notional_mode:
+            account.balance -= position_cost
 
         await self._save_state(account)
 
@@ -579,7 +867,7 @@ class PaperTrader:
             return
 
         try:
-            current_price = await self._fetch_price(account.symbol)
+            current_price = await self._fetch_price(account.symbol, market=account.market)
         except Exception as e:
             logger.error(f"[{account.account_id}] Ошибка получения цены: {e}")
             self._record_error(account, f"fetch_price: {e}")
@@ -609,24 +897,29 @@ class PaperTrader:
         entry = trade["entry_price"]
         amount = trade["amount"]
         cost = trade["cost"]
+        notional_mode = trade.get("notional_mode", False)
 
-        # PnL
-        if trade["side"] == "buy":
-            pnl = (close_price - entry) / entry * cost * account.leverage
+        move_pct = ((close_price - entry) if trade["side"] == "buy" else (entry - close_price)) / entry
+
+        if notional_mode:
+            # cost = полный notional, плечо уже «внутри» него. PnL = move% × notional.
+            pnl = move_pct * cost
+            commission = cost * 0.0004 * 2  # taker 0.04% на вход+выход (futures)
+            pnl_net = pnl - commission
+            account.balance += pnl_net          # cost не вычитали при открытии — не возвращаем
+            pnl_pct = pnl_net / account.initial_balance * 100  # % от депозита
         else:
-            pnl = (entry - close_price) / entry * cost * account.leverage
+            # классическая модель: cost = маржа, notional = cost × leverage
+            pnl = move_pct * cost * account.leverage
+            commission = cost * account.leverage * 0.0002 * 2
+            pnl_net = pnl - commission
+            account.balance += cost + pnl_net
+            pnl_pct = pnl_net / cost * 100
 
-        # Комиссия (maker 0.02% на вход и выход)
-        commission = cost * account.leverage * 0.0002 * 2
-        pnl_net = pnl - commission
-
-        account.balance += cost + pnl_net
         account.total_pnl += pnl_net
         account.trade_count += 1
         if pnl_net > 0:
             account.win_count += 1
-
-        pnl_pct = pnl_net / cost * 100
 
         # Сохраняем в историю
         closed_trade = {
@@ -713,6 +1006,11 @@ class PaperTrader:
             "eth_micro_15m": "ETH Micro Breakout 15m",
             "eth_pure_fake_4h": "ETH Fake Breakout 4h",
             "sol_combined_4h": "SOL Combined 4h",
+            "scalp_pepe_rsi_15m":     "PEPE Scalp RSI 15m",
+            "scalp_atom_rsi_15m":     "ATOM Scalp RSI 15m",
+            "scalp_render_rsi_15m":   "RENDER Scalp RSI 15m",
+            "scalp_ton_donchian_15m": "TON Scalp Donchian 15m",
+            "scalp_link_emavol_15m":  "LINK Scalp EMA+Vol 15m",
         }
         return titles.get(account.account_id, account.account_id)
 
@@ -936,11 +1234,24 @@ class PaperTrader:
                 "equity": acc.equity,
             })
 
+        # Telegram API канал — для админа отдельная критичная проверка
+        if self.telegram_api_ok is False:
+            err_suffix = f": {self.telegram_api_error}" if self.telegram_api_error else ""
+            issues.insert(0, f"Telegram API недоступен{err_suffix}")
+        if self.pending_alerts_count > 0:
+            issues.append(f"{self.pending_alerts_count} недоставленных алертов в очереди")
+
         return {
             "overall_ok": len(issues) == 0,
             "issues": issues,
             "accounts": accounts_status,
             "checked_at": now.isoformat(),
+            "telegram_api_ok": self.telegram_api_ok,
+            "telegram_api_checked_at": (
+                self.telegram_api_checked_at.isoformat() if self.telegram_api_checked_at else None
+            ),
+            "telegram_api_error": self.telegram_api_error,
+            "pending_alerts_count": self.pending_alerts_count,
         }
 
     def get_logs(self, last_n: int = 10) -> dict[str, list[dict]]:
