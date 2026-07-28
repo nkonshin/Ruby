@@ -15,6 +15,7 @@ import logging
 import argparse
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -33,7 +34,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot.log", encoding="utf-8"),
+        RotatingFileHandler(
+            "bot.log", maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        ),
     ],
 )
 logger = logging.getLogger("main")
