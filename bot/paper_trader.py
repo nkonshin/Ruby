@@ -1088,10 +1088,19 @@ class PaperTrader:
         return msg
 
     async def _send_warning(self, account: PaperAccount, signal, df) -> None:
-        """Warning при шортовом сигнале на открытый лонг (для signal-only)."""
+        """Warning при шортовом сигнале на открытый лонг (для signal-only).
+
+        Ровно одно предупреждение на позицию. Анализ 4h-стратегии крутится раз
+        в полчаса, и пока встречный сигнал держится, отсюда уходило по сообщению
+        за цикл — до полусотни одинаковых алертов в сутки на позицию, которую
+        держат неделями. Флаг живёт внутри open_trade, поэтому сам исчезает со
+        входом в новую позицию и переживает рестарт вместе с состоянием.
+        """
         if not account.open_trade:
             return
         trade = account.open_trade
+        if trade.get("exit_warning_sent"):
+            return
         entry = trade["entry_price"]
         current = float(df.iloc[-1]["close"])
         move_pct = (current - entry) / entry * 100
@@ -1118,8 +1127,10 @@ class PaperTrader:
             f"ℹ️ Это уведомление, не автоматическое действие"
         )
         await self._send(msg, account)
+        trade["exit_warning_sent"] = True
+        await self._save_state(account)
         self._add_log(account, "warning", f"Short signal на открытый лонг: {signal.reason}", {}, current)
-        logger.info(f"[{account.account_id}] WARNING: short signal on open long")
+        logger.info(f"[{account.account_id}] WARNING: short signal on open long (единожды за позицию)")
 
     @staticmethod
     def _apply_entry_filters(df: pd.DataFrame, account: PaperAccount) -> tuple[bool, str]:
